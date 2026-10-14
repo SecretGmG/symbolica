@@ -717,10 +717,17 @@ impl Token {
                 }
 
                 let symbol_whole = format!("{}::{}", namespace, symbol);
+                // Text attributes describe flags and tags, not alias registration.
+                // Preserve existing aliases while checking the explicit attributes.
+                let aliases = state
+                    .fetch_symbol(&symbol_whole)
+                    .map(|symbol| symbol.get_aliases().to_vec())
+                    .unwrap_or_default();
 
                 SymbolBuilder::new(crate::atom::NamespacedSymbol::parse(&symbol_whole))
                     .with_attributes(attributes)
                     .with_tags(tags)
+                    .with_aliases(aliases)
                     .build_with_state(state)
                     .map_err(|e| e.to_string())
             } else {
@@ -2170,6 +2177,91 @@ mod test {
 
         let input = parse!("symbolica::{}::f1()").get_symbol().unwrap();
         assert_eq!(input.get_name(), "symbolica::f1");
+    }
+
+    #[test]
+    fn canonical_aliased_symbols_roundtrip() {
+        use crate::atom::{Atom, NamespacedSymbol, SymbolBuilder};
+
+        let euler = Atom::var(crate::transcendental::euler_gamma());
+        assert_eq!(parse!(euler.to_canonical_string()), euler);
+
+        let head = SymbolBuilder::new(NamespacedSymbol::parse("parser_alias_roundtrip::f"))
+            .with_attributes(vec![SymbolAttribute::Symmetric])
+            .with_tags(["parser_alias_roundtrip::tag"])
+            .with_aliases(["alias"])
+            .build()
+            .unwrap();
+        let expression = crate::function!(head, 2, 1);
+        assert_eq!(parse!(expression.to_canonical_string()), expression);
+        assert_eq!(
+            parse!("parser_alias_roundtrip::{symmetric,parser_alias_roundtrip::tag}::alias(2,1)"),
+            expression
+        );
+        assert_eq!(head.get_aliases(), &["parser_alias_roundtrip::alias"]);
+    }
+
+    #[test]
+    fn canonical_euler_constant_in_cold_process() {
+        const CHILD: &str = "SYMBOLICA_CANONICAL_ALIAS_COLD_TEST";
+        if std::env::var_os(CHILD).is_some() {
+            let parsed = parse!("symbolica::{}::γ");
+            assert_eq!(
+                parsed,
+                crate::atom::Atom::var(crate::transcendental::euler_gamma())
+            );
+            assert_eq!(parsed, parse!("symbolica::{}::euler_gamma"));
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "parser::test::canonical_euler_constant_in_cold_process",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "cold canonical parsing failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn aliased_text_symbols_still_check_attributes_and_tags() {
+        use crate::atom::{Atom, NamespacedSymbol, SymbolBuilder};
+
+        let name = "parser_alias_checks::f";
+        let head = SymbolBuilder::new(NamespacedSymbol::parse(name))
+            .with_attributes(vec![SymbolAttribute::Symmetric])
+            .with_tags(["parser_alias_checks::tag"])
+            .with_aliases(["alias"])
+            .build()
+            .unwrap();
+        for input in [
+            "parser_alias_checks::{parser_alias_checks::tag}::f",
+            "parser_alias_checks::{symmetric}::f",
+            "parser_alias_checks::{symmetric,parser_alias_checks::other}::alias",
+        ] {
+            assert!(Atom::parse(input, "test", Default::default()).is_err());
+        }
+        assert!(
+            SymbolBuilder::new(NamespacedSymbol::parse(name))
+                .with_attributes(vec![SymbolAttribute::Symmetric])
+                .with_tags(["parser_alias_checks::tag"])
+                .with_aliases(["different_alias"])
+                .build()
+                .is_err()
+        );
+        assert_eq!(head.get_aliases(), &["parser_alias_checks::alias"]);
+        let fresh = parse!("parser_alias_checks::{symmetric}::fresh")
+            .get_symbol()
+            .unwrap();
+        assert!(fresh.is_symmetric());
+        assert!(fresh.get_aliases().is_empty());
     }
 
     #[test]
