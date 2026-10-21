@@ -130,6 +130,199 @@ fn evaluate_constant(tags: &[AtomView], bits: u32) -> Result<Complex<Float>, Str
     Ok(value)
 }
 
+static GPL: SymbolCache<Symbol> = SymbolCache::new(|| {
+    get_symbol!("sixth_root_gpl_at_one").expect("sixth-root GPL was initialized")
+});
+static GPL_LETTERS: SymbolCache<Symbol> = SymbolCache::new(|| {
+    get_symbol!("sixth_root_gpl_letters").expect("sixth-root GPL word tag was initialized")
+});
+
+#[cfg(not(doctest))]
+crate::_inventory::submit! {
+    StateInitializer::new("symbolica::sixth_root_gpl", || {
+        let _ = symbol!("sixth_root_gpl_letters";);
+        let _ = symbol!(
+            "sixth_root_gpl_at_one",
+            eval = EvaluationInfo::constant(evaluate_gpl_constant).with_tags(2)
+        );
+    }, &["symbolica"])
+}
+
+/// A letter for the supported ordinary GPLs at endpoint one.
+///
+/// `MinusRoot` is `-exp(sign*i*pi/3)` with the evaluator's requested sign.
+/// This is a restricted alphabet; it is not an arbitrary complex-letter GPL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SixthRootGplLetter {
+    Zero,
+    One,
+    MinusRoot,
+}
+
+impl SixthRootGplLetter {
+    fn index(self) -> i8 {
+        match self {
+            Self::Zero => 0,
+            Self::One => 1,
+            Self::MinusRoot => -1,
+        }
+    }
+
+    fn from_index(index: i8) -> Result<Self, String> {
+        match index {
+            0 => Ok(Self::Zero),
+            1 => Ok(Self::One),
+            -1 => Ok(Self::MinusRoot),
+            _ => Err("sixth-root GPL letter tags must be -1, 0 or 1".into()),
+        }
+    }
+}
+
+fn validate_gpl_word(word: &[SixthRootGplLetter]) -> Result<(), String> {
+    if word.len() > MAX_WEIGHT {
+        return Err("sixth-root GPL weight must be at most six".into());
+    }
+    if word.first() == Some(&SixthRootGplLetter::One) {
+        // This restriction prevents a Holder factor ending in zero. Some
+        // leading-One words are finite, but the present kernel does not handle
+        // those factors' log(1/2) terms. Do not call all such words divergent.
+        return Err("sixth-root GPL words beginning with the letter One are unsupported".into());
+    }
+    Ok(())
+}
+
+fn validate_gpl_sign(sign: i8) -> Result<(), String> {
+    if ![-1, 1].contains(&sign) {
+        return Err("sixth-root GPL sign must be exactly -1 or +1".into());
+    }
+    Ok(())
+}
+
+/// Symbol for `sixth_root_gpl_at_one(sixth_root_gpl_letters(...), sign)`.
+pub fn gpl_at_one_with_sixth_root_letters() -> Symbol {
+    *GPL
+}
+
+/// Construct an exact ordinary `G(a1,...,an;1)` constant on the straight path.
+///
+/// Allowed letters are 0, 1 and `-exp(sign*i*pi/3)`, weight at most six.
+/// Words beginning with 1 are outside this initial supported domain.
+pub fn sixth_root_gpl(word: &[SixthRootGplLetter], sign: i8) -> Result<Atom, String> {
+    validate_gpl_word(word)?;
+    validate_gpl_sign(sign)?;
+    let tag = GPL_LETTERS.call(
+        &word
+            .iter()
+            .map(|i| Atom::num(i.index()))
+            .collect::<Vec<_>>(),
+    );
+    Ok(function!(
+        gpl_at_one_with_sixth_root_letters(),
+        tag,
+        Atom::num(sign)
+    ))
+}
+
+/// Reusable batch of ordinary GPLs at one in the restricted sixth-root alphabet.
+///
+/// The same existing HPL fixed-point, Holder and ball machinery is used.
+pub struct SixthRootGplEvaluator {
+    inner: SixthRootHplEvaluator,
+}
+
+impl SixthRootGplEvaluator {
+    pub fn new(words: &[Vec<SixthRootGplLetter>]) -> Result<Self, String> {
+        if words.len() > MAX_WORDS {
+            return Err("sixth-root GPL batch exceeds 4096 words".into());
+        }
+        for word in words {
+            validate_gpl_word(word)?;
+        }
+        let indexed = words
+            .iter()
+            .map(|w| w.iter().map(|i| i.index()).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        Ok(Self {
+            inner: SixthRootHplEvaluator::prepare(&indexed, WordConvention::GplAtOne)?,
+        })
+    }
+
+    /// Evaluate the requested sign; precision is in binary bits.
+    pub fn evaluate(&self, sign: i8, bits: u32) -> Result<Vec<Complex<Float>>, String> {
+        validate_gpl_sign(sign)?;
+        // The original private Minus pole is -exp(-i*pi/3). Public sign +1
+        // selects its conjugate -exp(+i*pi/3), so invert the internal sign.
+        self.inner.evaluate(-sign, bits)
+    }
+}
+
+fn evaluate_gpl_constant(tags: &[AtomView], bits: u32) -> Result<Complex<Float>, String> {
+    let [word, sign] = tags else {
+        return Err("sixth-root GPL expects a letter tag and a sign".into());
+    };
+    let AtomView::Fun(word) = word else {
+        return Err("sixth-root GPL expects sixth_root_gpl_letters(...)".into());
+    };
+    if word.get_symbol() != *GPL_LETTERS {
+        return Err("sixth-root GPL expects sixth_root_gpl_letters(...)".into());
+    }
+    let indices = word
+        .iter()
+        .map(|i| {
+            i64::try_from(i)
+                .ok()
+                .and_then(|i| i8::try_from(i).ok())
+                .ok_or_else(|| "sixth-root GPL letter tags must be exact integers".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let letters = indices
+        .iter()
+        .map(|&i| SixthRootGplLetter::from_index(i))
+        .collect::<Result<Vec<_>, _>>()?;
+    let sign = i64::try_from(*sign)
+        .ok()
+        .and_then(|i| i8::try_from(i).ok())
+        .ok_or("sixth-root GPL sign must be exactly -1 or +1")?;
+    validate_gpl_word(&letters)?;
+    validate_gpl_sign(sign)?;
+    // A distinct cache keeps GPL-at-one values separate from HPL-at-omega.
+    static CACHE: OnceLock<Mutex<ConstantCache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let key = (indices, bits);
+    let cached = cache
+        .lock()
+        .map_err(|_| "GPL numerical cache is poisoned")?
+        .get(&key)
+        .cloned();
+    let mut value = if let Some(value) = cached {
+        value
+    } else {
+        let value = SixthRootGplEvaluator::new(&[letters])?
+            .evaluate(1, bits)?
+            .remove(0);
+        let mut cache = cache
+            .lock()
+            .map_err(|_| "GPL numerical cache is poisoned")?;
+        if cache.len() >= 512
+            || cache.keys().map(|(_, p)| u64::from(*p)).sum::<u64>() + u64::from(bits) > 64_000_000
+        {
+            cache.clear();
+        }
+        cache.insert(key, value.clone());
+        value
+    };
+    if sign == -1 {
+        value.im = -value.im;
+    }
+    Ok(value)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WordConvention {
+    HplAtSixthRoot,
+    GplAtOne,
+}
+
 type Expansion = BTreeMap<(Vec<i8>, usize), Rational>;
 
 fn remove_trailing_zeros(word: &[i8], memo: &mut BTreeMap<Vec<i8>, Expansion>) -> Expansion {
@@ -189,6 +382,7 @@ impl Pole {
     fn complement(self) -> Self {
         match self {
             Self::Zero => Self::One,
+            Self::One => Self::Zero,
             Self::Plus => Self::ComplementPlus,
             Self::Minus => Self::ComplementMinus,
             _ => unreachable!(),
@@ -270,11 +464,16 @@ pub struct SixthRootHplEvaluator {
     expansions: Vec<Expansion>,
     regular: BTreeMap<Vec<i8>, Vec<(usize, usize, i8)>>,
     nodes: Vec<Node>,
+    convention: WordConvention,
 }
 
 impl SixthRootHplEvaluator {
     /// Prepare up to 4096 words, each of weight at most six.
     pub fn new(words: &[Vec<i8>]) -> Result<Self, String> {
+        Self::prepare(words, WordConvention::HplAtSixthRoot)
+    }
+
+    fn prepare(words: &[Vec<i8>], convention: WordConvention) -> Result<Self, String> {
         if words.len() > MAX_WORDS {
             return Err("sixth-root HPL batch exceeds 4096 words".into());
         }
@@ -314,9 +513,23 @@ impl SixthRootHplEvaluator {
         for word in regular_words {
             // G(a1,...,an;1) = sum_j (-1)^j
             // G(1-aj,...,1-a1;1/2) G(a(j+1),...,an;1/2).
-            // The right word has no trailing zero; every left pole is nonzero.
-            let poles = word.iter().map(|&i| Pole::original(i)).collect::<Vec<_>>();
-            let hpl_sign = if word.iter().filter(|&&i| i == 1).count() % 2 == 0 {
+            // The right word has no trailing zero. The supported GPL first-letter
+            // restriction also keeps each left word free of trailing zeros.
+            let poles = word
+                .iter()
+                .map(|&i| match convention {
+                    WordConvention::HplAtSixthRoot => Pole::original(i),
+                    WordConvention::GplAtOne => match i {
+                        0 => Pole::Zero,
+                        1 => Pole::One,
+                        -1 => Pole::Minus,
+                        _ => unreachable!(),
+                    },
+                })
+                .collect::<Vec<_>>();
+            let hpl_sign = if convention == WordConvention::GplAtOne
+                || word.iter().filter(|&&i| i == 1).count() % 2 == 0
+            {
                 1
             } else {
                 -1
@@ -341,6 +554,7 @@ impl SixthRootHplEvaluator {
             expansions,
             regular,
             nodes,
+            convention,
         })
     }
 
@@ -470,10 +684,13 @@ impl SixthRootHplEvaluator {
             }
             masters.insert(word, value);
         }
-        let log = Complex::new(
-            zero.clone(),
-            one.pi() / RealBall::exact(Float::with_val(bits, 3)),
-        );
+        let log = match self.convention {
+            WordConvention::HplAtSixthRoot => Complex::new(
+                zero.clone(),
+                one.pi() / RealBall::exact(Float::with_val(bits, 3)),
+            ),
+            WordConvention::GplAtOne => Complex::new(zero.clone(), zero.clone()),
+        };
         let mut logs = vec![Complex::new(one, zero.clone())];
         for power in 1..=MAX_WEIGHT {
             logs.push(&logs[power - 1] * &log);
