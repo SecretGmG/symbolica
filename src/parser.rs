@@ -1645,18 +1645,13 @@ impl Token {
                             && (!c.is_ascii_digit()
                                 || !matches!(
                                     unsafe { stack.last().unwrap_unchecked() },
-                                    Token::Number(_, _)
-                                )
-                                || (settings.mode.is_mathematica()
-                                    && matches!(
-                                        unsafe { stack.last().unwrap_unchecked() },
-                                        Token::Number(_, true)
-                                    )))
+                                    Token::Number(_, false)
+                                ))
                         {
                             // insert implicit multiplication: x y -> x*y
-                            // do not allow implicit multiplication between two numbers as the risk
-                            // of a typo is too high. Mathematica imaginary coefficients are
-                            // an exception: the printer emits products such as I 3^(1/2).
+                            // Two real numeric literals require an explicit operator to avoid
+                            // copy-paste mistakes such as 2 3. An imaginary suffix makes
+                            // products such as 3i 2 or Mathematica's I 3^(1/2) unambiguous.
                             stack.push(Token::Op(true, true, Operator::Mul, vec![]));
                             extra_ops.push(c);
                         } else if c.is_ascii_digit() {
@@ -2201,6 +2196,37 @@ mod test {
     }
 
     #[test]
+    fn symbolica_imaginary_implicit_multiplication() {
+        use crate::{atom::Atom, parser::ParseSettings};
+
+        for eager in [true, false] {
+            for (input, expected) in [
+                ("2+3i 2^3", "2+24i"),
+                ("3i 2", "6i"),
+                ("-3i 2", "-6i"),
+                ("3i 2/3", "2i"),
+                ("3i 2 x", "6i*x"),
+                ("(2+3i 2^3)/2", "1+12i"),
+                ("3i\t2", "6i"),
+                ("3i\n2", "6i"),
+                ("3𝑖 2", "6i"),
+                ("𝑖 3", "3i"),
+            ] {
+                let actual = Atom::parse(
+                    input,
+                    "imaginary_parse_test",
+                    ParseSettings::default().convert_mul_to_atom(eager),
+                )
+                .unwrap_or_else(|error| panic!("{input}: {error}"));
+                let expected =
+                    Atom::parse(expected, "imaginary_parse_test", ParseSettings::default())
+                        .unwrap();
+                assert_eq!(actual, expected, "{input}, eager={eager}");
+            }
+        }
+    }
+
+    #[test]
     fn mathematica_complex_print_parse_roundtrip() {
         use crate::{atom::Atom, parser::ParseSettings};
 
@@ -2238,19 +2264,32 @@ mod test {
     fn imaginary_implicit_multiplication_preserves_other_tokens() {
         use crate::{atom::Atom, parser::ParseSettings};
 
-        for eager in [true, false] {
-            let settings = ParseSettings::mathematica().convert_mul_to_atom(eager);
-            assert!(Atom::parse("2 3", "imaginary_parse_test", settings.clone()).is_err());
-            for (input, expected) in [
-                ("I3", "I3"),
-                ("1IntegerName", "IntegerName"),
-                ("2 I3", "2*I3"),
-            ] {
-                assert_eq!(
-                    Atom::parse(input, "imaginary_parse_test", settings.clone()).unwrap(),
-                    Atom::parse(expected, "imaginary_parse_test", ParseSettings::default())
-                        .unwrap(),
-                );
+        for settings in [ParseSettings::default(), ParseSettings::mathematica()] {
+            for eager in [true, false] {
+                let settings = settings.clone().convert_mul_to_atom(eager);
+                for input in ["2 3", "2\t3", "2\n3", "2.0 3.0", "2e3 4", "2 3i", "3i 2 3"] {
+                    assert!(
+                        Atom::parse(input, "imaginary_parse_test", settings.clone()).is_err(),
+                        "{input}, mode={:?}, eager={eager}",
+                        settings.mode,
+                    );
+                }
+                for (input, expected) in [
+                    ("I3", "I3"),
+                    ("1IntegerName", "IntegerName"),
+                    ("2 I3", "2*I3"),
+                    ("1i3", "i3"),
+                    ("3i2", "3*i2"),
+                    ("3ix", "3*ix"),
+                ] {
+                    assert_eq!(
+                        Atom::parse(input, "imaginary_parse_test", settings.clone()).unwrap(),
+                        Atom::parse(expected, "imaginary_parse_test", ParseSettings::default())
+                            .unwrap(),
+                        "{input}, mode={:?}, eager={eager}",
+                        settings.mode,
+                    );
+                }
             }
         }
         for (input, expected) in [("I 3", "3*I"), ("1i3", "i3")] {
